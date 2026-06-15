@@ -154,6 +154,63 @@ class DuplicatePurchaseDetector:
             cursor.execute("SELECT 1 FROM product_embedding LIMIT 1")
             cursor.fetchone()
 
+    def search_existing_purchases(
+        self,
+        query: str = "",
+        fk_central_unit: int | None = None,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        cleaned_query = query.strip()
+        bounded_limit = max(1, min(limit, 100))
+
+        filters = [
+            "b.record_status = 'V'",
+            "b.approved IS TRUE",
+            "p.product_name IS NOT NULL",
+            "trim(p.product_name) <> ''",
+        ]
+        params: list[Any] = []
+
+        if cleaned_query:
+            filters.append("p.product_name ILIKE %s")
+            params.append(f"%{cleaned_query}%")
+        if fk_central_unit is not None:
+            filters.append("b.fk_central_unit = %s")
+            params.append(fk_central_unit)
+
+        params.append(bounded_limit)
+        where_clause = " AND ".join(filters)
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    b.id AS bill_id,
+                    b.transaction_id,
+                    b.order_id,
+                    b.supply_order_date,
+                    b.fk_central_unit,
+                    p.product_name
+                FROM gem_bill b
+                JOIN gem_product p ON p.fk_gem_bill = b.id
+                WHERE {where_clause}
+                ORDER BY b.supply_order_date DESC NULLS LAST, b.id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [
+                {
+                    "bill_id": row[0],
+                    "transaction_id": row[1],
+                    "order_id": row[2],
+                    "supply_order_date": str(row[3]),
+                    "fk_central_unit": row[4],
+                    "product_name": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+
     def check_purchase(
         self,
         product_name: str,

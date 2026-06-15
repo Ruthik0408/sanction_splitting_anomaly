@@ -5,12 +5,18 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from scripts.config import database_settings
+from scripts.config import BASE_DIR, database_settings
 from scripts.duplicate_detector import DuplicatePurchaseDetector
+
+
+FRONTEND_DIR = BASE_DIR / "frontend"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
+UI_STATIC_DIR = FRONTEND_DIST_DIR if FRONTEND_DIST_DIR.exists() else FRONTEND_DIR
 
 
 class PurchaseCheckRequest(BaseModel):
@@ -74,7 +80,7 @@ def detector() -> DuplicatePurchaseDetector:
 
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
-    return RedirectResponse(url="/docs")
+    return RedirectResponse(url="/ui")
 
 
 @app.get("/health")
@@ -94,6 +100,26 @@ def ready() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"status": "ready"}
+
+
+@app.get("/existing_purchases")
+def existing_purchases(
+    query: str = "",
+    fk_central_unit: int | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, Any]:
+    try:
+        return {
+            "items": detector().search_existing_purchases(
+                query=query,
+                fk_central_unit=fk_central_unit,
+                limit=limit,
+            )
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/check_purchase")
@@ -136,3 +162,6 @@ def check_bill(payload: BillCheckRequest) -> dict[str, Any]:
         "bill_flagged": any(flag["flagged"] for flag in product_flags),
         "products": product_flags,
     }
+
+
+app.mount("/ui", StaticFiles(directory=UI_STATIC_DIR, html=True), name="ui")

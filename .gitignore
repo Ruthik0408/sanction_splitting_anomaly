@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 categorization_artifacts/
 exports/
+frontend/node_modules/
+frontend/dist/
