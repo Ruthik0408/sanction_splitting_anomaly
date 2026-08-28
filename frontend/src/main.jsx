@@ -130,65 +130,70 @@ function App() {
       </header>
 
       <section className="workspace">
-        <form className="panel inputPanel" onSubmit={handleCheckPurchase}>
-          <div className="panelHeader">
-            <h2>Purchase Input</h2>
-            <button type="button" className="ghostButton" onClick={resetInput}>
-              <RefreshCcw size={16} />
-              Clear
+        <section className="leftColumn">
+          <form className="panel inputPanel" onSubmit={handleCheckPurchase}>
+            <div className="panelHeader">
+              <h2>Purchase Input</h2>
+              <button type="button" className="ghostButton" onClick={resetInput}>
+                <RefreshCcw size={16} />
+                Clear
+              </button>
+            </div>
+
+            {selectedRow && (
+              <div className="selectedNote">Selected bill {selectedRow.bill_id} from existing data</div>
+            )}
+
+            <label>
+              Product name
+              <textarea
+                value={form.product_name}
+                onChange={(event) => updateForm("product_name", event.target.value)}
+                placeholder="Example: rubber, eraser, cotton sports t-shirt"
+                rows={3}
+              />
+            </label>
+
+            <div className="formGrid">
+              <label>
+                Central unit
+                <input
+                  value={form.fk_central_unit}
+                  onChange={(event) => updateForm("fk_central_unit", event.target.value)}
+                  placeholder="4606"
+                  inputMode="numeric"
+                />
+              </label>
+              <label>
+                Supply order date
+                <input
+                  type="date"
+                  value={form.supply_order_date}
+                  onChange={(event) => updateForm("supply_order_date", event.target.value)}
+                />
+              </label>
+            </div>
+
+            <label>
+              Order ID
+              <input
+                value={form.order_id}
+                onChange={(event) => updateForm("order_id", event.target.value)}
+                placeholder="NEW_ORDER_001"
+              />
+            </label>
+
+            <button className="primaryButton" disabled={!canCheck || loading}>
+              <ShieldCheck size={18} />
+              {loading ? "Checking..." : "Check duplicate"}
             </button>
-          </div>
+          </form>
 
-          {selectedRow && (
-            <div className="selectedNote">Selected bill {selectedRow.bill_id} from existing data</div>
-          )}
+          {error && <div className="errorBox">{error}</div>}
+          <ResultPanel result={result} />
+        </section>
 
-          <label>
-            Product name
-            <textarea
-              value={form.product_name}
-              onChange={(event) => updateForm("product_name", event.target.value)}
-              placeholder="Example: rubber, eraser, cotton sports t-shirt"
-              rows={4}
-            />
-          </label>
-
-          <div className="formGrid">
-            <label>
-              Central unit
-              <input
-                value={form.fk_central_unit}
-                onChange={(event) => updateForm("fk_central_unit", event.target.value)}
-                placeholder="4606"
-                inputMode="numeric"
-              />
-            </label>
-            <label>
-              Supply order date
-              <input
-                type="date"
-                value={form.supply_order_date}
-                onChange={(event) => updateForm("supply_order_date", event.target.value)}
-              />
-            </label>
-          </div>
-
-          <label>
-            Order ID
-            <input
-              value={form.order_id}
-              onChange={(event) => updateForm("order_id", event.target.value)}
-              placeholder="NEW_ORDER_001"
-            />
-          </label>
-
-          <button className="primaryButton" disabled={!canCheck || loading}>
-            <ShieldCheck size={18} />
-            {loading ? "Checking..." : "Check duplicate"}
-          </button>
-        </form>
-
-        <section className="panel">
+        <section className="panel existingPanel">
           <div className="panelHeader">
             <h2>Existing Data</h2>
             <span className="muted">{existingRows.length} rows</span>
@@ -217,9 +222,6 @@ function App() {
           <ExistingRowsTable rows={existingRows} onSelect={selectExisting} />
         </section>
       </section>
-
-      {error && <div className="errorBox">{error}</div>}
-      <ResultPanel result={result} />
     </main>
   );
 }
@@ -288,19 +290,30 @@ function ResultPanel({ result }) {
       </div>
 
       <div className="metrics">
-        <Metric label="Best similarity" value={result.best_similarity_score} />
+        <Metric label={result.rerank?.enabled ? "Best rerank" : "Best similarity"} value={result.best_similarity_score} />
         <Metric label="Candidate rows" value={result.candidate_count} />
         <Metric label="Duplicate threshold" value={result.thresholds.duplicate} />
         <Metric label="Review threshold" value={result.thresholds.manual_review} />
       </div>
+      {result.rerank?.enabled && (
+        <div className="rerankNote">
+          Reranking top {result.rerank.top_k} candidates with {result.rerank.model}
+        </div>
+      )}
 
-      <h3>Conflicting Bills</h3>
-      <div className="tableWrap">
+      <LlmMatchPanel match={result.llm_same_product} />
+
+      <div className="resultSectionTitle">
+        <h3>Conflicting Bills</h3>
+        <span className="muted">{result.conflicting_bills.length} matches</span>
+      </div>
+      <div className="tableWrap resultTableWrap">
         <table>
           <thead>
             <tr>
               <th>Product</th>
-              <th>Similarity</th>
+              <th>{result.rerank?.enabled ? "Rerank" : "Similarity"}</th>
+              {result.rerank?.enabled && <th>Embedding</th>}
               <th>Date</th>
               <th>Order</th>
               <th>Transaction</th>
@@ -309,7 +322,7 @@ function ResultPanel({ result }) {
           <tbody>
             {result.conflicting_bills.length === 0 ? (
               <tr>
-                <td colSpan="5" className="emptyCell">
+                <td colSpan={result.rerank?.enabled ? "6" : "5"} className="emptyCell">
                   No similar historical purchases found.
                 </td>
               </tr>
@@ -317,7 +330,15 @@ function ResultPanel({ result }) {
               result.conflicting_bills.map((bill) => (
                 <tr key={`${bill.bill_id}-${bill.product_name}`}>
                   <td>{bill.product_name}</td>
-                  <td>{bill.similarity_score}</td>
+                  <td>
+                    {bill.similarity_score}
+                    {bill.llm_same_product !== undefined && (
+                      <div className={bill.llm_same_product ? "llmYes" : "llmNo"}>
+                        LLM: {bill.llm_same_product ? "Same product" : "Different"}
+                      </div>
+                    )}
+                  </td>
+                  {result.rerank?.enabled && <td>{bill.embedding_similarity_score ?? "-"}</td>}
                   <td>{bill.supply_order_date}</td>
                   <td>{bill.order_id || "-"}</td>
                   <td>{bill.transaction_id || "-"}</td>
@@ -327,6 +348,32 @@ function ResultPanel({ result }) {
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+function LlmMatchPanel({ match }) {
+  if (!match) return null;
+
+  return (
+    <section className={`categoryMatch ${match.available ? "" : "categoryMatchMuted"}`}>
+      <div>
+        <span>LLM same-product check</span>
+        <strong>{match.available ? "Completed" : "Unavailable"}</strong>
+      </div>
+      <div>
+        <span>Model</span>
+        <strong>{match.model || "-"}</strong>
+      </div>
+      <div>
+        <span>Confirmed matches</span>
+        <strong>{match.available ? match.matches.filter((item) => item.same_product).length : "-"}</strong>
+      </div>
+      <p>
+        {match.available
+          ? "The LLM compared the final reranked product names; only confirmed same products remain below."
+          : match.reason}
+      </p>
     </section>
   );
 }

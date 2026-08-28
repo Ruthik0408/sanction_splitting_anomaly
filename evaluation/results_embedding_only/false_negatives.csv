@@ -1,0 +1,7 @@
+score,threshold,product_a,product_b,label,case_type,normalized_a,normalized_b,embedding_cosine
+embedding_cosine,0.85,rubber,eraser,1,semantic_synonym,rubber,eraser,0.526833
+embedding_cosine,0.85,AC,air conditioner,1,semantic_synonym,ac,air conditioner,0.654695
+embedding_cosine,0.85,refrigrator,refrigerator,1,typo,refrigrator,refrigerator,0.718274
+embedding_cosine,0.85,notebook computer,laptop,1,semantic_synonym,notebook computer,laptop,0.786861
+embedding_cosine,0.85,PC,computer,1,semantic_synonym,pc,computer,0.802434
+embedding_cosine,0.85,air conditioner 1.5 ton,1.5 ton AC,1,abbreviation,air conditioner 1 5 ton,1 5 ton ac,0.839707

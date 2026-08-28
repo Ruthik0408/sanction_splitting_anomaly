@@ -43,19 +43,6 @@ OUTPUT_COLUMNS = [
     "unit_price",
     "total_value",
     "quantity_unit_type",
-    "vendor_name",
-    "bill_amount",
-    "amount_passed",
-    "same_underlying_product",
-    "renamed_equivalent",
-    "close_substitute",
-    "canonical_concept",
-    "material_difference",
-    "material_difference_reason",
-    "fraud_relevance",
-    "confidence",
-    "reason",
-    "local_validation_reason",
 ]
 CONTRADICTION_RE = re.compile(
     r"\b("
@@ -77,35 +64,6 @@ GENERIC_TOKENS = {
     "up",
     "with",
     "without",
-}
-PRODUCT_CATEGORY_KEYWORDS = {
-    "pen": {"pen", "gel", "ball", "rollerball", "ballpoint"},
-    "marker": {"marker", "markers", "paint"},
-    "printer_consumable": {"cartridge", "toner", "ribbon", "inkjet"},
-    "paper": {"paper", "gsm", "sheet", "sheets", "ream"},
-    "computer": {"computer", "desktop", "workstation", "pc"},
-    "laptop": {"laptop", "notebook"},
-    "software_support": {
-        "software",
-        "license",
-        "licence",
-        "subscription",
-        "support",
-        "amc",
-        "warranty",
-        "office",
-        "eoffice",
-    },
-    "medical_test": {
-        "elisa",
-        "hbsag",
-        "test",
-        "kit",
-        "kits",
-        "reagent",
-        "diagnostic",
-        "diagnostics",
-    },
 }
 
 
@@ -213,9 +171,6 @@ def load_candidates(args: AuditArgs) -> pd.DataFrame:
             "record_status",
             "approved",
             "fk_central_unit",
-            "vendor_name",
-            "bill_amount",
-            "amount_passed",
         ],
         low_memory=False,
     )
@@ -267,9 +222,6 @@ def load_candidates(args: AuditArgs) -> pd.DataFrame:
                 "order_id",
                 "supply_order_date",
                 "fk_central_unit",
-                "vendor_name",
-                "bill_amount",
-                "amount_passed",
             ]
         ],
         on="bill_id",
@@ -326,13 +278,6 @@ def product_tokens(value: str) -> set[str]:
     return {token for token in TOKEN_RE.findall(value.lower()) if token not in GENERIC_TOKENS}
 
 
-def product_categories(tokens: set[str]) -> set[str]:
-    return {
-        category
-        for category, keywords in PRODUCT_CATEGORY_KEYWORDS.items()
-        if tokens & keywords
-    }
-
 
 def has_category_conflict(input_categories: set[str], candidate_categories: set[str]) -> bool:
     if not input_categories or not candidate_categories:
@@ -361,11 +306,6 @@ def same_product_gate(input_product: str, candidate_product: str) -> tuple[bool,
     if not input_tokens or not candidate_tokens:
         return False, "empty normalized product name"
 
-    input_categories = product_categories(input_tokens)
-    candidate_categories = product_categories(candidate_tokens)
-    if has_category_conflict(input_categories, candidate_categories):
-        return False, "candidate belongs to a conflicting product category"
-
     overlap = input_tokens & candidate_tokens
     overlap_ratio = len(overlap) / min(len(input_tokens), len(candidate_tokens))
     jaccard = len(overlap) / len(input_tokens | candidate_tokens)
@@ -375,43 +315,12 @@ def same_product_gate(input_product: str, candidate_product: str) -> tuple[bool,
         return True, "high normalized name similarity"
     if overlap_ratio >= 0.65 and jaccard >= 0.45:
         return True, "strong token overlap"
-    if input_categories & candidate_categories and overlap_ratio >= 0.5 and sequence_ratio >= 0.62:
-        return True, "same category with supporting token overlap"
     return False, (
         "insufficient same-product evidence "
         f"(overlap={overlap_ratio:.2f}, jaccard={jaccard:.2f}, name_similarity={sequence_ratio:.2f})"
     )
 
 
-def llm_candidate_gate(input_product: str, candidate_product: str) -> tuple[bool, str]:
-    strict_match, strict_reason = same_product_gate(input_product, candidate_product)
-    if strict_match:
-        return True, strict_reason
-
-    input_clean = " ".join(TOKEN_RE.findall(input_product.lower()))
-    candidate_clean = " ".join(TOKEN_RE.findall(candidate_product.lower()))
-    input_tokens = product_tokens(input_product)
-    candidate_tokens = product_tokens(candidate_product)
-    input_categories = product_categories(input_tokens)
-    candidate_categories = product_categories(candidate_tokens)
-    if has_category_conflict(input_categories, candidate_categories):
-        return False, "candidate belongs to a conflicting product category"
-
-    overlap = input_tokens & candidate_tokens
-    overlap_ratio = len(overlap) / min(len(input_tokens), len(candidate_tokens))
-    sequence_ratio = difflib.SequenceMatcher(None, input_clean, candidate_clean).ratio()
-    if overlap_ratio >= 0.35 or sequence_ratio >= 0.55 or input_categories & candidate_categories:
-        return True, "possible same-product candidate for LLM review"
-    return False, "too little product-name evidence for LLM review"
-
-
-def filter_candidates_for_llm(input_product: str, candidates: pd.DataFrame) -> pd.DataFrame:
-    if candidates.empty:
-        return candidates
-    keep_mask = candidates["candidate_product_name"].map(
-        lambda candidate: llm_candidate_gate(input_product, str(candidate))[0]
-    )
-    return candidates[keep_mask].reset_index(drop=True)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -588,9 +497,6 @@ def enrich_matches(
         "unit_price",
         "total_value",
         "quantity_unit_type",
-        "vendor_name",
-        "bill_amount",
-        "amount_passed",
     ]
     output = base[selected_columns].merge(llm, on="row_id", how="inner")
     relevance_rank = {"high": 0, "medium": 1}
@@ -613,14 +519,12 @@ def main() -> int:
         return 2
 
     scanned_candidates = load_candidates(args)
-    candidates = filter_candidates_for_llm(args.product_name, scanned_candidates)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
-        candidates.to_csv(args.output_csv, index=False)
+        scanned_candidates.to_csv(args.output_csv, index=False)
         print(f"Wrote filtered candidates without LLM: {args.output_csv}")
         print(f"Scanned candidate rows: {len(scanned_candidates)}")
-        print(f"LLM candidate rows: {len(candidates)}")
         return 0
 
     if not args.api_url:
@@ -629,7 +533,7 @@ def main() -> int:
 
     all_matches: list[dict[str, Any]] = []
     try:
-        for batch in batch_rows(candidates, args.batch_size):
+        for batch in batch_rows(scanned_candidates, args.batch_size):
             all_matches.extend(call_llm(args, batch))
     except (
         KeyError,
@@ -641,10 +545,10 @@ def main() -> int:
         print(f"LLM audit failed: {exc}", file=sys.stderr)
         return 3
 
-    output = enrich_matches(args.product_name, candidates, all_matches)
+    output = enrich_matches(args.product_name, scanned_candidates, all_matches)
     output.to_csv(args.output_csv, index=False)
     print(f"Scanned candidate rows: {len(scanned_candidates)}")
-    print(f"LLM candidate rows: {len(candidates)}")
+    print(f"LLM candidate rows: {len(scanned_candidates)}")
     print(f"LLM suspicious matches: {len(output)}")
     print(f"Output: {args.output_csv}")
     if not output.empty:

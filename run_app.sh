@@ -23,4 +23,20 @@ if [[ ! -x "$ROOT_DIR/venv/bin/uvicorn" ]]; then
 fi
 
 echo "Starting backend and UI at http://localhost:${PORT}/ui"
-exec "$ROOT_DIR/venv/bin/uvicorn" scripts.api_server:app --host "$HOST" --port "$PORT"
+"$ROOT_DIR/venv/bin/uvicorn" scripts.api_server:app --host "$HOST" --port "$PORT" &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+for _ in {1..30}; do
+  if curl --silent --fail "http://127.0.0.1:${PORT}/health" >/dev/null; then
+    google-chrome "http://localhost:${PORT}/ui" >/dev/null 2>&1 &
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    wait "$SERVER_PID"
+    exit 1
+  fi
+  sleep 1
+done
+
+wait "$SERVER_PID"

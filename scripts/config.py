@@ -65,7 +65,12 @@ def duplicate_api_url() -> str:
 
 def embedding_model_name() -> str:
     load_env()
-    return env_value("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    return env_value("EMBEDDING_MODEL", "BAAI/bge-m3")
+
+
+def embedding_device() -> str:
+    load_env()
+    return env_value("EMBEDDING_DEVICE", "auto").strip().lower()
 
 
 def duplicate_match_threshold() -> float:
@@ -78,6 +83,11 @@ def duplicate_review_threshold() -> float:
     return float(env_value("DUPLICATE_REVIEW_THRESHOLD", "0.78"))
 
 
+def duplicate_retrieval_threshold() -> float:
+    load_env()
+    return float(env_value("DUPLICATE_RETRIEVAL_THRESHOLD", "0.50"))
+
+
 def duplicate_window_days() -> int:
     load_env()
     return int(env_value("DUPLICATE_WINDOW_DAYS", "60"))
@@ -85,4 +95,61 @@ def duplicate_window_days() -> int:
 
 def max_candidate_products() -> int:
     load_env()
-    return int(env_value("DUPLICATE_MAX_CANDIDATES", "5000"))
+    return int(env_value("DUPLICATE_MAX_CANDIDATES", "100"))
+
+
+def rerank_enabled() -> bool:
+    load_env()
+    value = os.environ.get("RERANK_ENABLED", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def rerank_model_name() -> str:
+    load_env()
+    return env_value("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2").strip()
+
+
+def rerank_device() -> str:
+    load_env()
+    return env_value("RERANK_DEVICE", "cpu").strip().lower()
+
+
+def rerank_top_k() -> int:
+    load_env()
+    return int(env_value("RERANK_TOP_K", "20"))
+
+
+def rerank_match_threshold() -> float:
+    load_env()
+    return float(env_value("RERANK_MATCH_THRESHOLD", "0.85"))
+
+
+def rerank_review_threshold() -> float:
+    load_env()
+    return float(env_value("RERANK_REVIEW_THRESHOLD", "0.70"))
+
+
+def semantic_category_match_enabled() -> bool:
+    load_env()
+    value = os.environ.get("SEMANTIC_CATEGORY_MATCH_ENABLED", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def semantic_api_url() -> str:
+    load_env()
+    return os.environ.get("SEMANTIC_API_URL", "").strip()
+
+
+def semantic_api_key() -> str:
+    load_env()
+    return os.environ.get("SEMANTIC_API_KEY", "").strip()
+
+
+def semantic_model() -> str:
+    load_env()
+    return env_value("SEMANTIC_MODEL", "Qwen3-30B-A3B-Instruct").strip()
+
+
+def semantic_timeout_seconds() -> int:
+    load_env()
+    return int(env_value("SEMANTIC_TIMEOUT_SECONDS", "5"))

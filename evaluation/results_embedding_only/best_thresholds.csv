@@ -1,0 +1,2 @@
+score,threshold,precision,recall,f1,predicted_positive
+embedding_cosine,0.85,0.875,0.7,0.7777777777777778,16

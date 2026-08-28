@@ -45,6 +45,8 @@ def load_env(path: Path) -> dict[str, str]:
 
 def regex_from_terms(value: str) -> str:
     terms = [term.strip().lower() for term in re.split(r"[,|]", value) if term.strip()]
+    if not terms:
+        return ""
     escaped = [re.escape(term).replace(r"\ ", r"\s+") for term in terms]
     return r"\m(" + "|".join(escaped) + r")\M"
 
@@ -64,18 +66,14 @@ def run_psql_copy(env: dict[str, str], target_regex: str, exclude_regex: str, ou
     schema = env.get("TULIP_SOURCE_DB_SCHEMA", "public")
     target_regex = target_regex.replace("'", "''")
     exclude_regex = exclude_regex.replace("'", "''")
+    exclude_filter = f"and text_to_match !~ '{exclude_regex}'" if exclude_regex else ""
     sql = f"""
 copy (
     with normalized as (
         select
             transaction_id,
             product_name,
-            lower(regexp_replace(
-                coalesce(product_category_name, '') || ' ' || coalesce(product_name, ''),
-                '[^a-z0-9]+',
-                ' ',
-                'g'
-            )) as text_to_match
+            lower(product_name) as text_to_match
         from "{schema}".gem_product
         where transaction_id is not null
           and btrim(transaction_id) <> ''
@@ -83,7 +81,7 @@ copy (
     select distinct transaction_id, product_name
     from normalized
     where text_to_match ~ '{target_regex}'
-      and text_to_match !~ '{exclude_regex}'
+      {exclude_filter}
     order by transaction_id, product_name
 ) to stdout with csv header
 """
@@ -242,11 +240,19 @@ def refine_with_api(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", default=".env")
-    parser.add_argument("--target", default=DEFAULT_TARGET)
-    parser.add_argument("--exclude", default=DEFAULT_EXCLUDES)
     parser.add_argument("--output-dir", default="exports/step1")
     parser.add_argument("--api-url", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument(
+        "--target",
+        required=True,
+        help="Comma- or pipe-separated product terms to include, for example 'computer,desktop,pc'.",
+    )
+    parser.add_argument(
+        "--exclude",
+        default="",
+        help="Comma- or pipe-separated product terms to exclude from broad candidates.",
+    )
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--skip-api", action="store_true")

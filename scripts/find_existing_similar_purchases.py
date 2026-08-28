@@ -17,7 +17,14 @@ from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 
-from scripts.config import artifacts_dir, duplicate_review_threshold, duplicate_window_days
+from scripts.config import (
+    artifacts_dir,
+    duplicate_review_threshold,
+    duplicate_window_days,
+    embedding_model_name,
+)
+from scripts.embedding_runtime import resolved_embedding_device
+from scripts.product_nlp import normalize_product_text
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -111,7 +118,7 @@ def load_existing_purchases(config: AuditConfig) -> pd.DataFrame:
     )
     products = pd.read_csv(
         config.product_csv,
-        usecols=["fk_gem_bill", "product_name", "product_category_name"],
+        usecols=["fk_gem_bill", "product_name"],
         low_memory=False,
     )
 
@@ -137,13 +144,6 @@ def load_existing_purchases(config: AuditConfig) -> pd.DataFrame:
     products["bill_id"] = products["fk_gem_bill"].astype("int64")
     products["product_name"] = normalized_text(products["product_name"])
     products = products[products["product_name"] != ""]
-
-    category_count = normalized_text(products["product_category_name"]).replace("", pd.NA).notna().sum()
-    if category_count:
-        print(
-            "product_category_name is sparse in this export; "
-            f"using product_name embeddings. Non-empty category rows: {category_count}"
-        )
 
     joined = products.merge(
         bills[
@@ -173,10 +173,13 @@ def load_existing_purchases(config: AuditConfig) -> pd.DataFrame:
 
 def embed_products(product_names: list[str]) -> np.ndarray:
     model_path = artifacts_dir() / "embedder"
-    model_source = str(model_path) if model_path.exists() else "all-MiniLM-L6-v2"
+    model_source = str(model_path) if model_path.exists() else embedding_model_name()
+    device = resolved_embedding_device()
     print(f"Loading embedding model: {model_source}")
-    embedder = SentenceTransformer(model_source)
-    embeddings = embedder.encode(product_names, batch_size=512, show_progress_bar=True)
+    print(f"Embedding device: {device}")
+    embedder = SentenceTransformer(model_source, device=device)
+    semantic_texts = [normalize_product_text(product_name) for product_name in product_names]
+    embeddings = embedder.encode(semantic_texts, batch_size=512, show_progress_bar=True)
     return normalize(np.asarray(embeddings, dtype=np.float32))
 
 
@@ -231,7 +234,17 @@ def suspicious_pairs_for_unit(
             if previous["order_id"] and previous["order_id"] == current["order_id"]:
                 continue
 
-            similarity = current_neighbors.get(previous["product_name"])
+            previous_semantic_text = normalize_product_text(previous["product_name"])
+            current_semantic_text = normalize_product_text(current["product_name"])
+            if previous["product_name"] == current["product_name"]:
+                similarity = 1.0
+                match_type = "exact_product_name"
+            elif previous_semantic_text == current_semantic_text:
+                similarity = 1.0
+                match_type = "same_normalized_text"
+            else:
+                similarity = current_neighbors.get(previous["product_name"])
+                match_type = "semantic_similarity"
             if similarity is None:
                 continue
 
@@ -239,6 +252,7 @@ def suspicious_pairs_for_unit(
                 {
                     "fk_central_unit": int(current["fk_central_unit"]),
                     "similarity_score": similarity,
+                    "match_type": match_type,
                     "days_between": int(abs((current_date - previous["supply_order_date"]).days)),
                     "transaction_id_1": previous["bill_transaction_id"],
                     "transaction_id_2": current["bill_transaction_id"],
@@ -250,6 +264,8 @@ def suspicious_pairs_for_unit(
                     "bill_id_2": int(current["bill_id"]),
                     "product_name_1": previous["product_name"],
                     "product_name_2": current["product_name"],
+                    "semantic_text_1": previous_semantic_text,
+                    "semantic_text_2": current_semantic_text,
                 }
             )
             if len(results) >= remaining_slots:

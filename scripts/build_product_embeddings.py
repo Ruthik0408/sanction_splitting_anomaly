@@ -6,7 +6,9 @@ Run this once after loading or refreshing product data.
 from __future__ import annotations
 
 import argparse
+import json
 import math
+from datetime import datetime, timezone
 
 import numpy as np
 import psycopg2
@@ -16,10 +18,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
 
 from scripts.config import artifacts_dir, database_settings, embedding_model_name
+from scripts.embedding_runtime import resolved_embedding_device
+from scripts.product_nlp import normalize_product_text
 
 
 BATCH_SIZE = 512
 VECTOR_INDEX_LISTS = 100
+MODEL_METADATA_FILE = "embedding_model.json"
 
 
 def to_pgvector(embedding: np.ndarray) -> str:
@@ -47,9 +52,8 @@ def recreate_embedding_table(cursor, embedding_dimension: int) -> None:
             """
             CREATE TABLE product_embedding (
                 product_name TEXT PRIMARY KEY,
-                embedding vector({dimension}) NOT NULL,
-                model_name TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                semantic_text TEXT NOT NULL,
+                embedding vector({dimension}) NOT NULL
             )
             """
         ).format(dimension=sql.Literal(embedding_dimension))
@@ -61,9 +65,15 @@ def recreate_embedding_table(cursor, embedding_dimension: int) -> None:
             ON gem_product(fk_gem_bill, product_name)
         """
     )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gem_product_bill_trimmed_product
+            ON gem_product(fk_gem_bill, trim(product_name))
+        """
+    )
 
 
-def create_vector_index(cursor) -> None:
+def create_runtime_indexes(cursor) -> None:
     cursor.execute(
         """
         CREATE INDEX idx_product_embedding_vector_cosine
@@ -94,12 +104,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def write_model_metadata(
+    artifact_path,
+    model_name: str,
+    device: str,
+    embedding_dimension: int,
+    product_count: int,
+) -> None:
+    metadata = {
+        "model_name": model_name,
+        "device": device,
+        "embedding_dimension": embedding_dimension,
+        "product_count": product_count,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "storage": "product_embedding",
+        "search": "pgvector_cosine_product_name_nlp",
+    }
+    (artifact_path / MODEL_METADATA_FILE).write_text(json.dumps(metadata, indent=2) + "\n")
+
+
 def main() -> None:
     args = parse_args()
     db = database_settings()
     artifact_path = artifacts_dir()
     artifact_path.mkdir(parents=True, exist_ok=True)
     model_name = embedding_model_name()
+    device = resolved_embedding_device()
 
     conn = psycopg2.connect(
         host=db.host,
@@ -119,8 +149,9 @@ def main() -> None:
 
         print("\n" + "=" * 60)
         print(f"STEP 2: Loading embedding model: {model_name}")
+        print(f"Embedding device: {device}")
         print("=" * 60)
-        embedder = SentenceTransformer(model_name)
+        embedder = SentenceTransformer(model_name, device=device)
         sample_embedding = embedder.encode(["dimension probe"], show_progress_bar=False)
         embedding_dimension = int(np.asarray(sample_embedding).shape[1])
         print(f"Embedding dimension: {embedding_dimension}")
@@ -135,20 +166,21 @@ def main() -> None:
         inserted = 0
 
         print("\n" + "=" * 60)
-        print("STEP 4: Embedding and inserting products")
+        print("STEP 4: NLP-normalizing, embedding, and inserting products")
         print("=" * 60)
         for batch_index, start in enumerate(range(0, len(products), args.batch_size), start=1):
             batch = products[start : start + args.batch_size]
-            embeddings = embedder.encode(batch, show_progress_bar=False)
+            semantic_texts = [normalize_product_text(product_name) for product_name in batch]
+            embeddings = embedder.encode(semantic_texts, show_progress_bar=False)
             embeddings = normalize(np.asarray(embeddings, dtype=np.float32))
             records = [
-                (product_name, to_pgvector(embedding), model_name)
-                for product_name, embedding in zip(batch, embeddings)
+                (product_name, semantic_text, to_pgvector(embedding))
+                for product_name, semantic_text, embedding in zip(batch, semantic_texts, embeddings)
             ]
             execute_values(
                 cursor,
                 """
-                INSERT INTO product_embedding (product_name, embedding, model_name)
+                INSERT INTO product_embedding (product_name, semantic_text, embedding)
                 VALUES %s
                 """,
                 records,
@@ -163,10 +195,17 @@ def main() -> None:
         print("\n" + "=" * 60)
         print("STEP 5: Creating vector index")
         print("=" * 60)
-        create_vector_index(cursor)
+        create_runtime_indexes(cursor)
         conn.commit()
 
         embedder.save(str(artifact_path / "embedder"))
+        write_model_metadata(
+            artifact_path=artifact_path,
+            model_name=model_name,
+            device=device,
+            embedding_dimension=embedding_dimension,
+            product_count=inserted,
+        )
 
         print("\n" + "=" * 60)
         print("EMBEDDING BUILD COMPLETE")
@@ -174,6 +213,7 @@ def main() -> None:
         print(f"Total products embedded: {inserted}")
         print("Database table created: product_embedding")
         print(f"Local model saved to: {artifact_path / 'embedder'}")
+        print(f"Model metadata saved to: {artifact_path / MODEL_METADATA_FILE}")
     finally:
         cursor.close()
         conn.close()

@@ -1,0 +1,3 @@
+score,threshold,product_a,product_b,label,case_type,normalized_a,normalized_b,embedding_cosine
+embedding_cosine,0.85,cotton gauze 18 meter x 60 centimeter,cotton gauze 18 meter x 90 centimeter,0,same_product_different_spec,cotton gauze 18 meter 60 centimeter,cotton gauze 18 meter 90 centimeter,0.952036
+embedding_cosine,0.85,printer,printer paper,0,related_but_not_same,printer,printer paper,0.88345
