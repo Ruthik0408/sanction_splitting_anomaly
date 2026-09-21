@@ -24,3 +24,4 @@ export function checkPurchase(payload) {
     body: JSON.stringify(payload),
   });
 }
+

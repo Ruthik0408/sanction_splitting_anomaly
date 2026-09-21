@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from sentence_transformers import SentenceTransformer
 
 from scripts.config import embedding_device
 
@@ -18,3 +19,15 @@ def resolved_embedding_device() -> str:
         )
         return "cpu"
     return requested_device
+
+
+def load_embedding_model(model_source: str) -> tuple[SentenceTransformer, str]:
+    """Load an embedder and recover when CUDA is visible but cannot allocate."""
+    device = resolved_embedding_device()
+    try:
+        return SentenceTransformer(model_source, device=device), device
+    except Exception as exc:
+        if not device.startswith("cuda"):
+            raise
+        print(f"CUDA embedding initialization failed; falling back to CPU: {exc}")
+        return SentenceTransformer(model_source, device="cpu"), "cpu"

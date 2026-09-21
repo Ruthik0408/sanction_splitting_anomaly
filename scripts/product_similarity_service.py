@@ -1,10 +1,11 @@
-"""Duplicate-purchase detection using semantic embedding similarity."""
+"""Historical product retrieval using semantic embedding similarity."""
 
 from __future__ import annotations
 
 import json
+import logging
 import math
-import urllib.error
+from time import perf_counter
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -14,7 +15,6 @@ import numpy as np
 import pandas as pd
 import psycopg2
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.cross_encoder import CrossEncoder
 from sklearn.preprocessing import normalize
 
 from scripts.config import (
@@ -32,21 +32,25 @@ from scripts.config import (
     rerank_model_name,
     rerank_review_threshold,
     rerank_top_k,
-    semantic_category_match_enabled,
 )
 from scripts.embedding_runtime import resolved_embedding_device
 from scripts.product_nlp import normalize_product_text
+from scripts.reranker_runtime import load_reranker
 from scripts.vllm_category_matcher import (
-    configured_vllm_category_settings,
     same_product_match,
     unavailable_category_match,
 )
 
 MODEL_METADATA_FILE = "embedding_model.json"
+logger = logging.getLogger("uvicorn.error")
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 2)
 
 
 @dataclass(frozen=True)
-class DuplicateDetectorSettings:
+class SimilaritySettings:
     match_threshold: float
     review_threshold: float
     retrieval_threshold: float
@@ -60,7 +64,7 @@ class DuplicateDetectorSettings:
     reranker_review_threshold: float
 
 
-class DuplicatePurchaseDetector:
+class ProductSimilarityService:
     def __init__(
         self,
         db_host: str,
@@ -69,10 +73,10 @@ class DuplicatePurchaseDetector:
         db_pass: str,
         db_port: int = 5432,
         model_dir: str | Path | None = None,
-        settings: DuplicateDetectorSettings | None = None,
+        settings: SimilaritySettings | None = None,
     ):
         """Load the embedding model and connect to the database."""
-        self.settings = settings or DuplicateDetectorSettings(
+        self.settings = settings or SimilaritySettings(
             match_threshold=duplicate_match_threshold(),
             review_threshold=duplicate_review_threshold(),
             retrieval_threshold=duplicate_retrieval_threshold(),
@@ -115,9 +119,10 @@ class DuplicatePurchaseDetector:
                 f"{self.settings.reranker_model} on {self.settings.reranker_device}"
             )
             try:
-                self.reranker = CrossEncoder(
+                self.reranker = load_reranker(
                     self.settings.reranker_model,
-                    device=self.settings.reranker_device,
+                    self.settings.reranker_device,
+                    local_files_only=True,
                 )
             except Exception as exc:
                 self.reranker_error = str(exc)
@@ -193,8 +198,10 @@ class DuplicatePurchaseDetector:
         fk_central_unit: int,
         order_id: str,
         supply_order_date: str,
-    ) -> tuple[list[tuple[Any, ...]], int]:
+    ) -> tuple[list[tuple[Any, ...]], int, dict[str, float]]:
+        embed_started_at = perf_counter()
         query_vector = self._to_pgvector(self._embed(product_name))
+        embed_ms = _elapsed_ms(embed_started_at)
 
         purchase_date = pd.to_datetime(supply_order_date)
         window_start = purchase_date - timedelta(days=self.settings.window_days)
@@ -203,6 +210,7 @@ class DuplicatePurchaseDetector:
         max_distance = 1.0 - self.settings.retrieval_threshold
         retrieval_pool = max(self.settings.max_candidates, 100)
 
+        database_started_at = perf_counter()
         with self.conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -311,7 +319,10 @@ class DuplicatePurchaseDetector:
 
             rows = cursor.fetchall()
 
-        return rows, len(rows)
+        return rows, len(rows), {
+            "embedding_ms": embed_ms,
+            "database_search_ms": _elapsed_ms(database_started_at),
+        }
 
     def readiness_check(self) -> None:
         with self.conn.cursor() as cursor:
@@ -403,8 +414,10 @@ class DuplicatePurchaseDetector:
         fk_central_unit: int,
         order_id: str,
         supply_order_date: str,
+        llm_provider: str = "auto",
     ) -> dict[str, Any]:
-        rows, candidate_count = self._similar_candidates(
+        total_started_at = perf_counter()
+        rows, candidate_count, timings = self._similar_candidates(
             product_name,
             fk_central_unit,
             order_id,
@@ -424,41 +437,39 @@ class DuplicatePurchaseDetector:
             for index, row in enumerate(rows, start=1)
         ]
         matches.sort(key=lambda item: item["similarity_score"], reverse=True)
+        rerank_started_at = perf_counter()
         matches = self._rerank_matches(product_name, matches)
-        llm_candidates = list(matches)
-
-        llm_match = unavailable_category_match("LLM same-product matching is disabled.")
-        if semantic_category_match_enabled():
-            vllm_settings = configured_vllm_category_settings()
-            if vllm_settings is None:
-                llm_match = unavailable_category_match("SEMANTIC_API_URL is not configured.")
-            elif matches:
-                try:
-                    llm_match = same_product_match(
-                        settings=vllm_settings,
-                        input_product_name=product_name,
-                        candidates=matches,
-                    )
-                    decisions = {
+        timings["reranking_ms"] = _elapsed_ms(rerank_started_at)
+        llm_match = unavailable_category_match(
+            "No candidate products were found for LLM comparison.", llm_provider
+        )
+        llm_started_at = perf_counter()
+        if matches:
+            llm_match = same_product_match(
+                provider=llm_provider,
+                input_product_name=product_name,
+                candidates=matches,
+            )
+            if llm_match.get("available"):
+                decisions = {
                         item["rank"]: item
                         for item in llm_match.get("matches", [])
                         if isinstance(item, dict)
-                    }
-                    confirmed_matches = []
-                    for rank, candidate in enumerate(matches, start=1):
-                        decision = decisions.get(rank)
-                        candidate["llm_same_product"] = bool(
-                            decision and decision.get("same_product") is True
-                        )
-                        candidate["llm_confidence"] = (
-                            decision.get("confidence", 0.0) if decision else 0.0
-                        )
-                        candidate["llm_reason"] = decision.get("reason", "") if decision else ""
-                        if candidate["llm_same_product"]:
-                            confirmed_matches.append(candidate)
-                    matches = confirmed_matches
-                except (KeyError, TypeError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
-                    llm_match = unavailable_category_match(f"LLM same-product matching failed: {exc}")
+                }
+                confirmed_matches = []
+                for rank, candidate in enumerate(matches, start=1):
+                    decision = decisions.get(rank)
+                    candidate["llm_same_product"] = bool(
+                        decision and decision.get("same_product") is True
+                    )
+                    candidate["llm_confidence"] = (
+                        decision.get("confidence", 0.0) if decision else 0.0
+                    )
+                    candidate["llm_reason"] = decision.get("reason", "") if decision else ""
+                    if candidate["llm_same_product"]:
+                        confirmed_matches.append(candidate)
+                matches = confirmed_matches
+        timings["llm_verification_ms"] = _elapsed_ms(llm_started_at)
 
         best_score = matches[0]["similarity_score"] if matches else 0.0
         reranker_active = self.reranker is not None
@@ -493,6 +504,26 @@ class DuplicatePurchaseDetector:
             flagged = False
             reason = "No semantically similar approved purchase found in the configured window."
 
+        timings["total_ms"] = _elapsed_ms(total_started_at)
+        stage_timings = {
+            **timings,
+            "slowest_stage": max(
+                (
+                    "embedding_ms",
+                    "database_search_ms",
+                    "reranking_ms",
+                    "llm_verification_ms",
+                ),
+                key=timings.__getitem__,
+            ),
+        }
+        logger.info(
+            "purchase_check_timing product_length=%d candidates=%d timings=%s",
+            len(product_name),
+            candidate_count,
+            stage_timings,
+        )
+
         return {
             "flagged": flagged,
             "decision": decision,
@@ -512,8 +543,9 @@ class DuplicatePurchaseDetector:
                 "error": self.reranker_error,
             },
             "reason": reason,
-            "conflicting_bills": llm_candidates if llm_match.get("available") else matches,
+            "conflicting_bills": matches,
             "candidate_count": candidate_count,
+            "timings": stage_timings,
         }
 
     def close(self) -> None:
@@ -522,7 +554,7 @@ class DuplicatePurchaseDetector:
 
 if __name__ == "__main__":
     db = database_settings()
-    detector = DuplicatePurchaseDetector(
+    detector = ProductSimilarityService(
         db_host=db.host,
         db_port=db.port,
         db_name=db.name,

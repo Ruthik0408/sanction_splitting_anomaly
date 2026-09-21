@@ -1,61 +1,50 @@
-"""Product-name cleanup for semantic duplicate detection.
-
-The project does not rely on a category column or hand-maintained synonym
-dictionaries. This module only removes generic noise from product_name; semantic
-meaning is left to the configured embedding model.
-"""
+"""Auditable text preparation and generic product-specification extraction."""
 
 from __future__ import annotations
 
 import re
-
-
-TOKEN_RE = re.compile(r"[a-z0-9]+")
+SEMANTIC_NORMALIZATION_VERSION = "semantic-v2"
+LEXICAL_NORMALIZATION_VERSION = "lexical-v2"
 SPACE_RE = re.compile(r"\s+")
-
-NOISE_TOKENS = {
-    "and",
-    "by",
-    "for",
-    "from",
-    "in",
-    "of",
-    "or",
-    "the",
-    "to",
-    "with",
-    "without",
-    "unbranded",
-    "generic",
-    "compatible",
-    "type",
-    "model",
-    "series",
-    "new",
+UNIT_ALIASES = {
+    "litre": "l", "litres": "l", "liter": "l", "liters": "l", "ltr": "l", "ltrs": "l",
+    "gigabyte": "gb", "gigabytes": "gb", "terabyte": "tb", "terabytes": "tb",
+    "volt": "v", "volts": "v", "horsepower": "hp",
+    "piece": "pcs", "pieces": "pcs", "pc": "pcs",
 }
+UNIT_PATTERN = "|".join(sorted((re.escape(value) for value in UNIT_ALIASES), key=len, reverse=True))
+CANONICAL_UNITS = "mm|cm|m|ml|l|mg|g|kg|kb|mb|gb|tb|w|kw|v|kv|hp|hz|mah|ah|pcs"
 
-def _drop_token(token: str) -> bool:
-    if token in NOISE_TOKENS:
-        return True
-    if len(token) == 1 and not token.isdigit():
-        return True
-    return False
+
+def _normalize_units(text: str) -> str:
+    text = re.sub(
+        rf"(?<=\d)\s*(?:{UNIT_PATTERN})\b",
+        lambda match: UNIT_ALIASES[match.group(0).strip()],
+        text,
+    )
+    return re.sub(rf"(?<=\d)\s*({CANONICAL_UNITS})\b", r"\1", text)
+
+
+def prepare_embedding_text(product_name: str) -> str:
+    """Prepare model input while retaining identifiers and specification values."""
+    original = product_name.strip().lower()
+    text = original.replace("&", " and ").replace("×", "x")
+    text = re.sub(r"(?<![a-z0-9])-|-(?![a-z0-9])", " ", text)
+    text = re.sub(r"[^a-z0-9-]+", " ", text)
+    text = _normalize_units(text)
+    return SPACE_RE.sub(" ", text).strip() or original
+
+
+def prepare_lexical_text(product_name: str) -> str:
+    """Prepare fuzzy/token input, making identifier punctuation comparable."""
+    text = prepare_embedding_text(product_name)
+    lexical_text = SPACE_RE.sub(" ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+    # A valid source name can contain only symbols or non-ASCII characters.
+    # Preserve it rather than storing an unusable empty trigram value.
+    return lexical_text or text
 
 
 def normalize_product_text(product_name: str) -> str:
-    """Return cleaned text derived only from product_name."""
-    text = product_name.lower()
-    text = text.replace("&", " and ")
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    text = SPACE_RE.sub(" ", text).strip()
+    """Backward-compatible alias for semantic preparation."""
+    return prepare_embedding_text(product_name)
 
-    original_tokens = TOKEN_RE.findall(text)
-    normalized_tokens: list[str] = []
-
-    for token in original_tokens:
-        if _drop_token(token):
-            continue
-        normalized_tokens.append(token)
-
-    deduped_tokens = list(dict.fromkeys(normalized_tokens))
-    return " ".join(deduped_tokens) or product_name.strip().lower()

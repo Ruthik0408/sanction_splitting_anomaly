@@ -42,6 +42,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
+  const [llmProvider, setLlmProvider] = useState("auto");
 
   const canCheck = useMemo(
     () =>
@@ -107,6 +108,7 @@ function App() {
         fk_central_unit: Number(form.fk_central_unit),
         order_id: form.order_id.trim(),
         supply_order_date: form.supply_order_date,
+        llm_provider: llmProvider,
       });
       setResult(data);
     } catch (err) {
@@ -149,10 +151,35 @@ function App() {
               <textarea
                 value={form.product_name}
                 onChange={(event) => updateForm("product_name", event.target.value)}
-                placeholder="Example: rubber, eraser, cotton sports t-shirt"
+                placeholder="Example:any product name"
                 rows={3}
               />
             </label>
+
+            <fieldset className="providerSelector">
+              <legend>LLM provider</legend>
+              <div className="providerOptions">
+                {[
+                  ["auto", "Auto", "vLLM first, then OpenAI fallback"],
+                  ["vllm", "vLLM", "Use only the configured vLLM server"],
+                  ["openai", "OpenAI", "Use only the OpenAI API"],
+                ].map(([value, label, description]) => (
+                  <label key={value} className={llmProvider === value ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name="llm-provider"
+                      value={value}
+                      checked={llmProvider === value}
+                      onChange={(event) => setLlmProvider(event.target.value)}
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{description}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
 
             <div className="formGrid">
               <label>
@@ -295,6 +322,15 @@ function ResultPanel({ result }) {
         <Metric label="Duplicate threshold" value={result.thresholds.duplicate} />
         <Metric label="Review threshold" value={result.thresholds.manual_review} />
       </div>
+      {result.timings && (
+        <div className="rerankNote">
+          Total {result.timings.total_ms} ms · Slowest: {formatTimingName(result.timings.slowest_stage)} ({result.timings[result.timings.slowest_stage]} ms)
+          {" · "}Embedding {result.timings.embedding_ms} ms
+          {" · "}Database {result.timings.database_search_ms} ms
+          {" · "}Reranking {result.timings.reranking_ms} ms
+          {" · "}LLM {result.timings.llm_verification_ms} ms
+        </div>
+      )}
       {result.rerank?.enabled && (
         <div className="rerankNote">
           Reranking top {result.rerank.top_k} candidates with {result.rerank.model}
@@ -362,6 +398,10 @@ function LlmMatchPanel({ match }) {
         <strong>{match.available ? "Completed" : "Unavailable"}</strong>
       </div>
       <div>
+        <span>Provider</span>
+        <strong>{match.provider || "-"}</strong>
+      </div>
+      <div>
         <span>Model</span>
         <strong>{match.model || "-"}</strong>
       </div>
@@ -369,11 +409,16 @@ function LlmMatchPanel({ match }) {
         <span>Confirmed matches</span>
         <strong>{match.available ? match.matches.filter((item) => item.same_product).length : "-"}</strong>
       </div>
+      <div>
+        <span>Candidates checked</span>
+        <strong>{match.available ? match.candidate_count : "-"}</strong>
+      </div>
       <p>
         {match.available
           ? "The LLM compared the final reranked product names; only confirmed same products remain below."
           : match.reason}
       </p>
+      {match.fallback_reason && <p className="fallbackNote">Fallback: {match.fallback_reason}</p>}
     </section>
   );
 }
@@ -385,6 +430,10 @@ function Metric({ label, value }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatTimingName(name) {
+  return String(name || "").replace(/_ms$/, "").replaceAll("_", " ");
 }
 
 createRoot(document.getElementById("root")).render(<App />);

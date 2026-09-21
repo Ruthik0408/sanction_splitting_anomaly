@@ -2,7 +2,8 @@ fastapi
 numpy
 pandas
 psycopg2-binary
-requests
 scikit-learn
 sentence-transformers
 uvicorn[standard]
+einops
+transformers==4.57.6

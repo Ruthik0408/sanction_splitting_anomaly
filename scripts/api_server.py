@@ -1,17 +1,18 @@
-"""FastAPI service for duplicate purchase validation."""
+"""FastAPI interface for historical product-similarity search."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scripts.config import BASE_DIR, database_settings
-from scripts.duplicate_detector import DuplicatePurchaseDetector
+from scripts.product_similarity_service import ProductSimilarityService
 
 
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -20,22 +21,16 @@ UI_STATIC_DIR = FRONTEND_DIST_DIR if FRONTEND_DIST_DIR.exists() else FRONTEND_DI
 
 
 class PurchaseCheckRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
     product_name: str = Field(..., min_length=1)
     fk_central_unit: int
     order_id: str = Field(..., min_length=1)
-    supply_order_date: str = Field(..., min_length=1)
-
-
-class BillCheckRequest(BaseModel):
-    bill_id: int | str
-    fk_central_unit: int
-    order_id: str = Field(..., min_length=1)
-    supply_order_date: str = Field(..., min_length=1)
-    products: list[str] = Field(default_factory=list)
+    supply_order_date: date
+    llm_provider: Literal["auto", "vllm", "openai"] = "auto"
 
 
 class AppState:
-    detector: DuplicatePurchaseDetector | None = None
+    similarity_service: ProductSimilarityService | None = None
     startup_error: str | None = None
 
 
@@ -44,9 +39,9 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    db = database_settings()
     try:
-        state.detector = DuplicatePurchaseDetector(
+        db = database_settings()
+        state.similarity_service = ProductSimilarityService(
             db_host=db.host,
             db_port=db.port,
             db_name=db.name,
@@ -55,27 +50,27 @@ async def lifespan(_: FastAPI):
         )
         state.startup_error = None
     except Exception as exc:
-        state.detector = None
+        state.similarity_service = None
         state.startup_error = str(exc)
     try:
         yield
     finally:
-        if state.detector is not None:
-            state.detector.close()
+        if state.similarity_service is not None:
+            state.similarity_service.close()
 
 
 app = FastAPI(
-    title="Duplicate Purchase Detector",
+    title="Product Similarity Service",
     version="1.0.0",
     lifespan=lifespan,
 )
 
 
-def detector() -> DuplicatePurchaseDetector:
-    if state.detector is None:
-        detail = state.startup_error or "Detector is not initialized"
+def similarity_service() -> ProductSimilarityService:
+    if state.similarity_service is None:
+        detail = state.startup_error or "Similarity service is not initialized"
         raise HTTPException(status_code=503, detail=detail)
-    return state.detector
+    return state.similarity_service
 
 
 @app.get("/", include_in_schema=False)
@@ -90,13 +85,13 @@ def health() -> dict[str, str]:
 
 @app.get("/ready")
 def ready() -> dict[str, str]:
-    if state.detector is None:
+    if state.similarity_service is None:
         raise HTTPException(
             status_code=503,
-            detail=state.startup_error or "Detector is not initialized",
+            detail=state.startup_error or "Similarity service is not initialized",
         )
     try:
-        state.detector.readiness_check()
+        state.similarity_service.readiness_check()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"status": "ready"}
@@ -110,7 +105,7 @@ def existing_purchases(
 ) -> dict[str, Any]:
     try:
         return {
-            "items": detector().search_existing_purchases(
+            "items": similarity_service().search_existing_purchases(
                 query=query,
                 fk_central_unit=fk_central_unit,
                 limit=limit,
@@ -125,43 +120,17 @@ def existing_purchases(
 @app.post("/check_purchase")
 def check_purchase(payload: PurchaseCheckRequest) -> dict[str, Any]:
     try:
-        return detector().check_purchase(
+        return similarity_service().check_purchase(
             product_name=payload.product_name,
             fk_central_unit=payload.fk_central_unit,
             order_id=payload.order_id,
-            supply_order_date=payload.supply_order_date,
+            supply_order_date=payload.supply_order_date.isoformat(),
+            llm_provider=payload.llm_provider,
         )
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/check_bill")
-def check_bill(payload: BillCheckRequest) -> dict[str, Any]:
-    try:
-        product_flags = [
-            {
-                "product_name": product_name,
-                **detector().check_purchase(
-                    product_name=product_name,
-                    fk_central_unit=payload.fk_central_unit,
-                    order_id=payload.order_id,
-                    supply_order_date=payload.supply_order_date,
-                ),
-            }
-            for product_name in payload.products
-        ]
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {
-        "bill_id": payload.bill_id,
-        "bill_flagged": any(flag["flagged"] for flag in product_flags),
-        "products": product_flags,
-    }
 
 
 app.mount("/ui", StaticFiles(directory=UI_STATIC_DIR, html=True), name="ui")
